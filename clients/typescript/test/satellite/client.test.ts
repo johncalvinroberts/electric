@@ -283,6 +283,7 @@ test.serial('receive transaction over multiple messages', async (t) => {
         HKT
       >,
     },
+    [],
     []
   )
 
@@ -693,6 +694,7 @@ test.serial('default and null test', async (t) => {
       table: tbl,
       Items: tbl,
     },
+    [],
     []
   )
 
@@ -1031,6 +1033,7 @@ test.serial('subscription correct protocol sequence with data', async (t) => {
       table: tbl,
       [tablename]: tbl,
     },
+    [],
     []
   )
 
