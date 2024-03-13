@@ -220,7 +220,8 @@ defmodule Electric.Satellite.Protocol do
               in_rep: %InRep{},
               out_rep: %OutRep{},
               auth_provider: nil,
-              connector_config: [],
+              connector_config: nil,
+              origin: nil,
               subscriptions: %{},
               subscription_data_fun: nil,
               telemetry: nil
@@ -234,7 +235,8 @@ defmodule Electric.Satellite.Protocol do
             in_rep: InRep.t(),
             out_rep: OutRep.t(),
             auth_provider: Electric.Satellite.Auth.provider(),
-            connector_config: Keyword.t(),
+            connector_config: Connectors.config(),
+            origin: Connectors.origin(),
             subscriptions: map(),
             subscription_data_fun: fun(),
             telemetry: Telemetry.t() | nil
@@ -269,11 +271,9 @@ defmodule Electric.Satellite.Protocol do
     # succeed as well
     reg_name = Electric.Satellite.WebsocketServer.reg_name(client_id)
 
-    origin = Connectors.origin(state.connector_config)
-
     with {:ok, auth} <- Electric.Satellite.Auth.validate_token(token, state.auth_provider),
          true <- Electric.safe_reg(reg_name, 1000),
-         :ok <- ClientManager.register_client(client_id, reg_name, origin) do
+         :ok <- ClientManager.register_client(client_id, reg_name, state.origin) do
       Logger.metadata(user_id: auth.user_id)
       Logger.info("Successfully authenticated the client")
       Metrics.satellite_connection_event(%{authorized_connection: 1})
@@ -443,7 +443,7 @@ defmodule Electric.Satellite.Protocol do
          }, state}
 
       true ->
-        case Shapes.validate_requests(requests, Connectors.origin(state.connector_config)) do
+        case Shapes.validate_requests(requests, state.origin) do
           {:ok, requests} ->
             query_subscription_data(id, requests, state)
 
@@ -477,7 +477,7 @@ defmodule Electric.Satellite.Protocol do
       |> Map.put(:out_rep, out_rep)
       |> Map.update!(:subscriptions, &Map.drop(&1, ids))
 
-    for id <- ids, do: SubscriptionManager.delete_subscription(state.client_id, id)
+    for id <- ids, do: SubscriptionManager.delete_subscription(state.origin, state.client_id, id)
 
     if needs_unpausing? do
       {:force_unpause, %SatUnsubsResp{}, state}
@@ -610,10 +610,7 @@ defmodule Electric.Satellite.Protocol do
         {incomplete, complete} ->
           complete = Enum.reverse(complete)
 
-          case WriteValidation.validate_transactions!(
-                 complete,
-                 {SchemaCache, Connectors.origin(state.connector_config)}
-               ) do
+          case WriteValidation.validate_transactions!(complete, {SchemaCache, state.origin}) do
             {:ok, accepted} ->
               {nil, send_transactions(accepted, incomplete, state)}
 
@@ -700,9 +697,7 @@ defmodule Electric.Satellite.Protocol do
   end
 
   defp handle_start_replication_request(msg, lsn, state) do
-    origin = Connectors.origin(state.connector_config)
-
-    if CachedWal.Api.lsn_in_cached_window?(origin, lsn) do
+    if CachedWal.Api.lsn_in_cached_window?(state.origin, lsn) do
       case restore_subscriptions(msg.subscription_ids, state) do
         {:ok, state} ->
           state =
@@ -718,7 +713,7 @@ defmodule Electric.Satellite.Protocol do
       end
     else
       # Once the client is outside the WAL window, we are assuming the client will re-establish subscriptions, so we'll discard them
-      SubscriptionManager.delete_all_subscriptions(state.client_id)
+      SubscriptionManager.delete_all_subscriptions(state.origin, state.client_id)
 
       {:error,
        start_replication_error(:BEHIND_WINDOW, "Cannot catch up to the server's current state")}
@@ -976,7 +971,7 @@ defmodule Electric.Satellite.Protocol do
           "Requested data for subscription #{id}, insertion point is at xmin = #{xmin}"
         )
 
-        SubscriptionManager.save_subscription(state.client_id, id, requests)
+        SubscriptionManager.save_subscription(state.origin, state.client_id, id, requests)
 
         state =
           state
@@ -1028,7 +1023,7 @@ defmodule Electric.Satellite.Protocol do
 
   defp restore_subscriptions(subscription_ids, %State{} = state) do
     Enum.reduce_while(subscription_ids, {:ok, state}, fn id, {:ok, state} ->
-      case SubscriptionManager.fetch_subscription(state.client_id, id) do
+      case SubscriptionManager.fetch_subscription(state.origin, state.client_id, id) do
         {:ok, results} ->
           state = Map.update!(state, :subscriptions, &Map.put(&1, id, results))
           {:cont, {:ok, state}}

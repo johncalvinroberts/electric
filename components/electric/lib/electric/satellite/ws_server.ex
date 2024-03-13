@@ -50,11 +50,14 @@ defmodule Electric.Satellite.WebsocketServer do
 
   @impl WebSock
   def init(opts) do
+    connector_config = Keyword.fetch!(opts, :connector_config)
+
     {:ok,
      schedule_ping(%State{
        last_msg_time: :erlang.timestamp(),
        auth_provider: Keyword.fetch!(opts, :auth_provider),
-       connector_config: Keyword.fetch!(opts, :connector_config),
+       connector_config: connector_config,
+       origin: Electric.Replication.Connectors.origin(connector_config),
        subscription_data_fun: Keyword.fetch!(opts, :subscription_data_fun),
        telemetry: %Telemetry{
          connection_span:
