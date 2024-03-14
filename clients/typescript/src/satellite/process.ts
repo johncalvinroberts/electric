@@ -982,16 +982,24 @@ export class SatelliteProcess implements Satellite {
       // This is fine because only the first operation of the TX must override previous TXs
       // and the rest of the operations in the TX just need to be aware of the current TX
       // because conflict resolution on Electric happens on the level of TXs
+
+      // FIXME: temporary fix for PG because we still need to change the query
+      //        executed by `setClearTagsForTimestamp` for PG to match the fix
+      //        we also applied in SQLite
+      const args =
+        this.builder.dialect === 'Postgres'
+          ? [timestamp.toISOString()]
+          : [
+              encodeTags([newTag]),
+              timestamp.toISOString(),
+              timestamp.toISOString(),
+            ]
       const q2: Statement = {
         sql: this.builder.setClearTagsForTimestamp(
           this.opts.oplogTable,
           this.opts.shadowTable
         ),
-        args: [
-          encodeTags([newTag]),
-          timestamp.toISOString(),
-          timestamp.toISOString(),
-        ],
+        args,
       }
 
       // For each affected shadow row, set new tag array, unless the last oplog operation was a DELETE
