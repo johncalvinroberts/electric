@@ -29,7 +29,6 @@ defmodule Electric.Satellite.Protocol do
 
   require Logger
 
-  @type lsn() :: non_neg_integer
   @producer_timeout 5_000
   @producer_demand 5
 
@@ -340,16 +339,16 @@ defmodule Electric.Satellite.Protocol do
 
   # Satellite client request replication
   def handle_rpc_request(
-        %SatInStartReplicationReq{lsn: client_lsn, options: opts} = msg,
+        %SatInStartReplicationReq{lsn: client_pos, options: opts} = msg,
         %State{} = state
       ) do
     Logger.debug(
-      "Received start replication request lsn: #{inspect(client_lsn)} with options: #{inspect(opts)}"
+      "Received start replication request at client_pos: #{inspect(client_pos)} with options: #{inspect(opts)}"
     )
 
     with :ok <- validate_schema_version(msg.schema_version),
-         {:ok, lsn} <- validate_lsn(client_lsn) do
-      handle_start_replication_request(msg, lsn, state)
+         {:ok, client_pos} <- validate_client_pos(client_pos) do
+      handle_start_replication_request(msg, client_pos, state)
     else
       {:error, :bad_schema_version} ->
         Logger.warning("Unknown client schema version: #{inspect(msg.schema_version)}")
@@ -360,8 +359,8 @@ defmodule Electric.Satellite.Protocol do
            "Unknown schema version: #{inspect(msg.schema_version)}"
          )}
 
-      {:error, {:malformed_lsn, client_lsn}} ->
-        Logger.warning("Client has supplied invalid LSN in the request: #{inspect(client_lsn)}")
+      {:error, {:malformed_pos, client_pos}} ->
+        Logger.warning("Client has supplied invalid LSN in the request: #{inspect(client_pos)}")
 
         {:error,
          start_replication_error(:MALFORMED_LSN, "Could not validate start replication request")}
@@ -696,27 +695,55 @@ defmodule Electric.Satellite.Protocol do
      )}
   end
 
-  defp handle_start_replication_request(msg, lsn, state) do
-    if CachedWal.Api.lsn_in_cached_window?(state.origin, lsn) do
-      case restore_subscriptions(msg.subscription_ids, state) do
-        {:ok, state} ->
-          state =
-            state
-            |> start_replication_telemetry(subscriptions: length(msg.subscription_ids))
-            |> subscribe_client_to_replication_stream(lsn)
+  defp handle_start_replication_request(msg, client_pos, state) do
+    result =
+      case reserve_wal_position(state.origin, state.client_id, client_pos) do
+        :cached ->
+          # Fast path: the client can resume replication using WAL records cached in main memory.
+          with {:ok, state} <- try_restoring_subscriptions(msg.subscription_ids, state) do
+            {:ok, subscribe_client_to_replication_stream(state, client_pos)}
+          end
 
-          {:reply, %SatInStartReplicationResp{}, state}
+        :behind_window ->
+          # The client is outside of the resumable WAL window. It will clear its local state and re-establish
+          # subscriptions, so we'll discard them here.
+          SubscriptionManager.delete_all_subscriptions(state.origin, state.client_id)
 
-        {:error, bad_id} ->
-          {:error,
-           start_replication_error(:SUBSCRIPTION_NOT_FOUND, "Unknown subscription: #{bad_id}")}
+          {:error, :behind_window}
       end
-    else
-      # Once the client is outside the WAL window, we are assuming the client will re-establish subscriptions, so we'll discard them
-      SubscriptionManager.delete_all_subscriptions(state.origin, state.client_id)
 
-      {:error,
-       start_replication_error(:BEHIND_WINDOW, "Cannot catch up to the server's current state")}
+    case result do
+      {:ok, state} ->
+        {:reply, %SatInStartReplicationResp{}, state}
+
+      {:error, {:subscription_not_found, bad_id}} ->
+        {:error,
+         start_replication_error(:SUBSCRIPTION_NOT_FOUND, "Unknown subscription: #{bad_id}")}
+
+      {:error, :behind_window} ->
+        {:error,
+         start_replication_error(:BEHIND_WINDOW, "Cannot catch up to the server's current state")}
+    end
+  end
+
+  defp reserve_wal_position(origin, client_id, client_pos) do
+    cond do
+      CachedWal.Api.reserve_wal_position(origin, client_id, client_pos) == {:ok, client_pos} ->
+        :cached
+
+      true ->
+        :behind_window
+    end
+  end
+
+  defp try_restoring_subscriptions(subscription_ids, state) do
+    case restore_subscriptions(subscription_ids, state) do
+      {:ok, state} ->
+        state = start_replication_telemetry(state, subscriptions: length(subscription_ids))
+        {:ok, state}
+
+      {:error, bad_id} ->
+        {:error, {:subscription_not_found, bad_id}}
     end
   end
 
@@ -803,8 +830,8 @@ defmodule Electric.Satellite.Protocol do
     {serialize_unknown_relations(unknown_relations), serialized_log, out_rep}
   end
 
-  @spec subscribe_client_to_replication_stream(State.t(), any()) :: State.t()
-  def subscribe_client_to_replication_stream(%State{out_rep: out_rep} = state, lsn) do
+  @spec subscribe_client_to_replication_stream(State.t(), non_neg_integer()) :: State.t()
+  def subscribe_client_to_replication_stream(%State{out_rep: out_rep} = state, client_pos) do
     Metrics.satellite_replication_event(%{started: 1})
 
     {:via, :gproc, producer} = CachedWal.Producer.name(state.client_id)
@@ -813,7 +840,7 @@ defmodule Electric.Satellite.Protocol do
 
     opts = [
       to: sub_pid,
-      start_subscription: lsn,
+      start_subscription: client_pos,
       min_demand: 5,
       max_demand: 10
     ]
@@ -823,12 +850,14 @@ defmodule Electric.Satellite.Protocol do
     Process.send(sub_pid, msg, [])
     ask({sub_pid, sub_ref}, @producer_demand)
 
+    CachedWal.Api.cancel_reservation(state.origin, state.client_id)
+
     out_rep = %OutRep{
       out_rep
       | pid: sub_pid,
         status: :active,
         stage_sub: sub_ref,
-        last_seen_wal_pos: lsn
+        last_seen_wal_pos: client_pos
     }
 
     %State{state | out_rep: out_rep}
@@ -870,8 +899,7 @@ defmodule Electric.Satellite.Protocol do
        relations,
        %SatSubsDataBegin{
          subscription_id: id,
-         lsn:
-           Electric.Postgres.CachedWal.Api.serialize_wal_position(state.out_rep.last_seen_wal_pos)
+         lsn: CachedWal.Api.serialize_wal_position(state.out_rep.last_seen_wal_pos)
        },
        messages,
        %SatSubsDataEnd{}
@@ -919,12 +947,12 @@ defmodule Electric.Satellite.Protocol do
     end
   end
 
-  defp validate_lsn(""), do: {:ok, :initial_sync}
+  defp validate_client_pos(""), do: {:ok, :initial_sync}
 
-  defp validate_lsn(client_lsn) do
-    case CachedWal.Api.parse_wal_position(client_lsn) do
+  defp validate_client_pos(client_pos) do
+    case CachedWal.Api.parse_wal_position(client_pos) do
       {:ok, value} -> {:ok, value}
-      :error -> {:error, {:malformed_lsn, client_lsn}}
+      :error -> {:error, {:malformed_lsn, client_pos}}
     end
   end
 
