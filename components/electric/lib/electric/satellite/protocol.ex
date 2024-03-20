@@ -18,8 +18,13 @@ defmodule Electric.Satellite.Protocol do
 
   alias Electric.Replication.Changes.Transaction
   alias Electric.Postgres.Extension.SchemaCache
+  alias Electric.Postgres.LogicalReplication
+  alias Electric.Postgres.Lsn
   alias Electric.Postgres.Schema
   alias Electric.Replication.Changes
+  alias Electric.Replication.Postgres.Client
+  alias Electric.Replication.Postgres.LogicalMessages
+  alias Electric.Replication.Postgres.LogicalReplicationProducer
   alias Electric.Replication.Shapes
   alias Electric.Replication.Shapes.ShapeRequest
   alias Electric.Satellite.Serialization
@@ -208,6 +213,34 @@ defmodule Electric.Satellite.Protocol do
       do: :queue.any(&match?({_, ^id}, &1), queue)
   end
 
+  defmodule ResumeRep do
+    defstruct [:repl_conn, :repl_context, :end_lsn]
+
+    @type t :: %__MODULE__{
+            repl_conn: :epgsql.connection(),
+            repl_context: LogicalMessages.Context.t(),
+            end_lsn: Lsn.t()
+          }
+
+    def process_message(binary_msg, %ResumeRep{} = rep) do
+      rep =
+        update_in(rep.repl_context, fn context ->
+          binary_msg
+          |> LogicalReplication.decode_message()
+          |> LogicalMessages.process(context)
+        end)
+
+      case rep.repl_context.transaction do
+        nil -> {nil, rep}
+        %Transaction{} = tx -> {tx, reset_tx(rep)}
+      end
+    end
+
+    defp reset_tx(%ResumeRep{} = rep) do
+      update_in(rep.repl_context, &LogicalMessages.Context.reset_tx/1)
+    end
+  end
+
   defmodule State do
     alias Electric.Replication.Shapes.ShapeRequest
 
@@ -218,6 +251,7 @@ defmodule Electric.Satellite.Protocol do
               expiration_timer: nil,
               in_rep: %InRep{},
               out_rep: %OutRep{},
+              resume_rep: nil,
               auth_provider: nil,
               connector_config: nil,
               origin: nil,
@@ -233,6 +267,7 @@ defmodule Electric.Satellite.Protocol do
             expiration_timer: {reference(), reference()} | nil,
             in_rep: InRep.t(),
             out_rep: OutRep.t(),
+            resume_rep: ResumeRep.t() | nil,
             auth_provider: Electric.Satellite.Auth.provider(),
             connector_config: Connectors.config(),
             origin: Connectors.origin(),
@@ -704,6 +739,13 @@ defmodule Electric.Satellite.Protocol do
             {:ok, subscribe_client_to_replication_stream(state, client_pos)}
           end
 
+        :resumable ->
+          # Slow path: stream missed WAL records from the database before subscribing the client to the stream.
+          with {:ok, state} <- try_restoring_subscriptions(msg.subscription_ids, state) do
+            client_lsn = CachedWal.EtsBacked.position_to_lsn(client_pos)
+            stream_transactions_from_wal(state, client_lsn)
+          end
+
         :behind_window ->
           # The client is outside of the resumable WAL window. It will clear its local state and re-establish
           # subscriptions, so we'll discard them here.
@@ -727,9 +769,14 @@ defmodule Electric.Satellite.Protocol do
   end
 
   defp reserve_wal_position(origin, client_id, client_pos) do
+    client_lsn = CachedWal.EtsBacked.position_to_lsn(client_pos)
+
     cond do
       CachedWal.Api.reserve_wal_position(origin, client_id, client_pos) == {:ok, client_pos} ->
         :cached
+
+      LogicalReplicationProducer.reserve_wal_lsn(origin, client_id, client_lsn) == :ok ->
+        :resumable
 
       true ->
         :behind_window
@@ -744,6 +791,67 @@ defmodule Electric.Satellite.Protocol do
 
       {:error, bad_id} ->
         {:error, {:subscription_not_found, bad_id}}
+    end
+  end
+
+  defp stream_transactions_from_wal(%{connector_config: connector_config} = state, client_lsn) do
+    main_slot = Connectors.get_replication_opts(connector_config).slot
+    tmp_slot = "electric_r_" <> String.replace(state.client_id, "-", "")
+
+    {:ok, first_cached_wal_pos} =
+      CachedWal.Api.reserve_wal_position(state.origin, state.client_id, :oldest)
+
+    conn_opts = Connectors.get_connection_opts(connector_config, replication: true)
+    publication = Connectors.get_replication_opts(connector_config).publication
+
+    with {:ok, conn} <- Client.connect(conn_opts),
+         {:ok, _slot_name, _slot_lsn} <-
+           Client.create_temporary_slot(conn, main_slot, tmp_slot),
+         :ok <- Client.set_display_settings_for_replication(conn),
+         :ok <- Client.start_replication(conn, publication, tmp_slot, client_lsn, self()) do
+      # Now that replication has started from the desired LSN, we can remove the reservation
+      # that was made made earlier.
+      LogicalReplicationProducer.cancel_reservation(state.origin, state.client_id)
+
+      repl_context = %LogicalMessages.Context{
+        origin: state.origin,
+        publication: publication
+      }
+
+      resume_rep = %ResumeRep{
+        repl_conn: conn,
+        repl_context: repl_context,
+        end_lsn: CachedWal.EtsBacked.position_to_lsn(first_cached_wal_pos)
+      }
+
+      {:ok, %{state | resume_rep: resume_rep}}
+    end
+  end
+
+  def handle_x_log_data(binary_msg, state) do
+    {tx, resume_rep} = ResumeRep.process_message(binary_msg, state.resume_rep)
+    state = %{state | resume_rep: resume_rep}
+
+    case tx do
+      nil ->
+        {[], state}
+
+      %Transaction{} = tx ->
+        reached_cached_lsn? = Lsn.compare(tx.lsn, resume_rep.end_lsn) in [:eq, :gt]
+
+        state =
+          if reached_cached_lsn? do
+            # This is the last transaction we wanted to stream from WAL.
+            Client.close(resume_rep.repl_conn)
+
+            start_wal_pos = CachedWal.EtsBacked.lsn_to_position(resume_rep.end_lsn)
+            subscribe_client_to_replication_stream(%{state | resume_rep: nil}, start_wal_pos)
+          else
+            state
+          end
+
+        wal_pos = CachedWal.EtsBacked.lsn_to_position(tx.lsn)
+        handle_outgoing_txs([{tx, wal_pos}], state)
     end
   end
 
