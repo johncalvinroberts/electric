@@ -25,6 +25,7 @@ defmodule Electric.Postgres.Extension do
   @electrified_table_relation "electrified"
   @acked_client_lsn_relation "acknowledged_client_lsns"
   @client_shape_subscriptions_relation "client_shape_subscriptions"
+  @client_checkpoints_relation "client_checkpoints"
 
   @grants_relation "grants"
   @roles_relation "roles"
@@ -40,6 +41,7 @@ defmodule Electric.Postgres.Extension do
   @transaction_marker_table electric.("transaction_marker")
   @acked_client_lsn_table electric.(@acked_client_lsn_relation)
   @client_shape_subscriptions_table electric.(@client_shape_subscriptions_relation)
+  @client_checkpoints_table electric.(@client_checkpoints_relation)
 
   @grants_table electric.(@grants_relation)
   @roles_table electric.(@roles_relation)
@@ -110,6 +112,7 @@ defmodule Electric.Postgres.Extension do
   def transaction_marker_table, do: @transaction_marker_table
   def acked_client_lsn_table, do: @acked_client_lsn_table
   def client_shape_subscriptions_table, do: @client_shape_subscriptions_table
+  def client_checkpoints_table, do: @client_checkpoints_table
 
   def grants_table, do: @grants_table
   def roles_table, do: @roles_table
@@ -551,8 +554,8 @@ defmodule Electric.Postgres.Extension do
   def fetch_last_acked_client_lsn(conn, client_id) do
     case :epgsql.equery(conn, @last_acked_client_lsn_equery, [client_id]) do
       {:ok, _, [{lsn}]} ->
-        # No need for a decoding step here because :epgsql.equery() uses Postgres' binary protocol, so a BYTEA value
-        # is returned as a raw binary.
+        # No need for a decoding step here because :epgsql.equery() uses Postgres' binary
+        # protocol, so a BYTEA value is returned as a raw binary.
         lsn
 
       {:ok, _, []} ->
