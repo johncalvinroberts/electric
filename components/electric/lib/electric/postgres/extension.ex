@@ -24,6 +24,7 @@ defmodule Electric.Postgres.Extension do
   @schema_relation "schema"
   @electrified_table_relation "electrified"
   @acked_client_lsn_relation "acknowledged_client_lsns"
+  @client_actions_relation "client_actions"
   @client_shape_subscriptions_relation "client_shape_subscriptions"
   @client_checkpoints_relation "client_checkpoints"
 
@@ -40,6 +41,7 @@ defmodule Electric.Postgres.Extension do
   @electrified_tracking_table electric.(@electrified_table_relation)
   @transaction_marker_table electric.("transaction_marker")
   @acked_client_lsn_table electric.(@acked_client_lsn_relation)
+  @client_actions_table electric.(@client_actions_relation)
   @client_shape_subscriptions_table electric.(@client_shape_subscriptions_relation)
   @client_checkpoints_table electric.(@client_checkpoints_relation)
 
@@ -111,6 +113,7 @@ defmodule Electric.Postgres.Extension do
   def electrified_tracking_table, do: @electrified_tracking_table
   def transaction_marker_table, do: @transaction_marker_table
   def acked_client_lsn_table, do: @acked_client_lsn_table
+  def client_actions_table, do: @client_actions_table
   def client_shape_subscriptions_table, do: @client_shape_subscriptions_table
   def client_checkpoints_table, do: @client_checkpoints_table
 
