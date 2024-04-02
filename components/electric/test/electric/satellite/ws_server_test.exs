@@ -44,18 +44,21 @@ defmodule Electric.Satellite.WebsocketServerTest do
       )
       |> Map.put_new(:allowed_unacked_txs, 30)
 
+    connector_config = [origin: "test-origin", connection: []]
     port = 55133
 
     plug =
       {Electric.Plug.SatelliteWebsocketPlug,
        auth_provider: Auth.provider(),
-       connector_config: [origin: "fake_origin"],
+       connector_config: connector_config,
        subscription_data_fun: ctx.subscription_data_fun,
        allowed_unacked_txs: ctx.allowed_unacked_txs}
 
     start_link_supervised!({Bandit, port: port, plug: plug})
 
     server_id = Electric.instance_id()
+
+    start_link_supervised!({Electric.Satellite.ClientReconnectionInfo, connector_config})
 
     {:ok, port: port, server_id: server_id}
   end

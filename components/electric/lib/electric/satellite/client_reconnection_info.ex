@@ -243,10 +243,12 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
     :ets.match_delete(@additional_data_ets, {{client_id, :_, :_, :_, :_}, :_, :_})
     :ets.delete(@checkpoint_ets, client_id)
 
-    {:ok, _} = query(origin, @delete_subscriptions_query, [client_id])
-    {:ok, _} = query(origin, @delete_checkpoint_query, [client_id])
-    {:ok, _} = query(origin, @delete_actions_query, [client_id])
-    {:ok, _} = query(origin, @delete_additional_data_for_client_query, [client_id])
+    with_conn(origin, fn conn ->
+      {:ok, _} = :epgsql.equery(conn, @delete_subscriptions_query, [client_id])
+      {:ok, _} = :epgsql.equery(conn, @delete_checkpoint_query, [client_id])
+      {:ok, _} = :epgsql.equery(conn, @delete_actions_query, [client_id])
+      {:ok, _} = :epgsql.equery(conn, @delete_additional_data_for_client_query, [client_id])
+    end)
 
     :ok
   end
@@ -280,8 +282,12 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
       {{client_id, :_, :_, :subscription, subscription_id}, :_, :_}
     )
 
-    {:ok, 1} = query(origin, @delete_subscription_query, [client_id, subscription_id])
-    {:ok, 1} = query(origin, @delete_subscription_data_query, [client_id, subscription_id])
+    with_conn(origin, fn conn ->
+      {:ok, 1} = :epgsql.equery(conn, @delete_subscription_query, [client_id, subscription_id])
+
+      {:ok, 1} =
+        :epgsql.equery(conn, @delete_subscription_data_query, [client_id, subscription_id])
+    end)
 
     :ok
   end
@@ -310,8 +316,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
   defp store_client_checkpoint(origin, client_id, wal_pos, sent_rows_graph) do
     :ets.insert(@checkpoint_ets, {client_id, wal_pos, sent_rows_graph})
     sent_rows_graph_bin = :erlang.term_to_binary(sent_rows_graph)
-    {:ok, 1} = query(origin, @upsert_checkpoint_query, [client_id, wal_pos, sent_rows_graph_bin])
-    :ok
+    :ok = query(origin, @upsert_checkpoint_query, [client_id, wal_pos, sent_rows_graph_bin])
   end
 
   @doc """
@@ -407,7 +412,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
       :ets.match_delete(@additional_data_ets, {{client_id, :_, :_, :_, :_}, :_, :_})
 
       origin = Keyword.fetch!(opts, :origin)
-      {:ok, _} = query(origin, @delete_additional_data_for_client_query, [client_id])
+      :ok = query(origin, @delete_additional_data_for_client_query, [client_id])
 
       actions =
         @actions_ets
@@ -489,7 +494,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
         [client_id, txid, :erlang.term_to_binary(actions)]
       end)
 
-    {:ok, 1} = query(origin, store_actions_query(map_size(actions_map)), values)
+    :ok = query(origin, store_actions_query(map_size(actions_map)), values)
 
     :ok
   end
@@ -580,7 +585,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
   defp delete_additional_data(origin, {client_id, _xmin, order, _subject, _subscription_id} = key) do
     :ets.delete(@additional_data_ets, key)
 
-    {:ok, 1} = query(origin, @delete_additional_data_for_key_query, [client_id, order])
+    :ok = query(origin, @delete_additional_data_for_key_query, [client_id, order])
 
     :ok
   end
@@ -611,7 +616,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
   def store_subscription(origin, client_id, subscription_id, xmin, pos, requests) do
     :ets.insert(@subscriptions_ets, {{client_id, subscription_id}, xmin, requests, pos})
 
-    {:ok, 1} =
+    :ok =
       query(origin, @insert_subscription_query, [
         client_id,
         subscription_id,
@@ -619,8 +624,6 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
         pos,
         :erlang.term_to_binary(requests)
       ])
-
-    :ok
   end
 
   defp list_subscriptions(client_id) do
@@ -656,7 +659,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
       {{client_id, xmin, pos, :subscription, subscription_id}, graph_diff, []}
     )
 
-    {:ok, 1} =
+    :ok =
       query(origin, @insert_subscription_data_query, [
         client_id,
         xmin,
@@ -664,8 +667,6 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
         subscription_id,
         :erlang.term_to_binary(graph_diff)
       ])
-
-    :ok
   end
 
   @insert_transaction_data_query """
@@ -692,7 +693,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
       {{client_id, xmin, pos, :transaction, nil}, graph_diff, included_txns}
     )
 
-    {:ok, 1} =
+    :ok =
       query(origin, @insert_transaction_data_query, [
         client_id,
         xmin,
@@ -700,8 +701,6 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
         :erlang.term_to_binary(graph_diff),
         included_txns
       ])
-
-    :ok
   end
 
   defp pop_additional_data_before(client_id, txid) do
@@ -728,9 +727,7 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
 
     :ets.select_delete(@actions_ets, matchspec)
 
-    {:ok, _} = query(origin, @delete_actions_for_xids_query, [client_id, txids])
-
-    :ok
+    :ok = query(origin, @delete_actions_for_xids_query, [client_id, txids])
   end
 
   @impl GenServer
@@ -745,17 +742,19 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
     origin = Connectors.origin(connector_config)
     :persistent_term.put(name(origin), connector_config)
 
-    restore_checkpoint_cache(origin, checkpoint_table)
-    restore_subscriptions_cache(origin, subscriptions_table)
-    restore_additional_data_cache(origin, additional_data_table)
-    restore_actions_cache(origin, actions_table)
+    with_conn(origin, fn conn ->
+      restore_checkpoint_cache(conn, checkpoint_table)
+      restore_subscriptions_cache(conn, subscriptions_table)
+      restore_additional_data_cache(conn, additional_data_table)
+      restore_actions_cache(conn, actions_table)
+    end)
 
     {:ok, nil}
   end
 
-  defp restore_checkpoint_cache(origin, checkpoint_table) do
+  defp restore_checkpoint_cache(conn, checkpoint_table) do
     {:ok, _, rows} =
-      query(origin, "SELECT * FROM #{Extension.client_checkpoints_table()}", [])
+      :epgsql.equery(conn, "SELECT * FROM #{Extension.client_checkpoints_table()}", [])
 
     checkpoints =
       for {client_id, wal_pos, sent_rows_graph} <- rows do
@@ -765,9 +764,9 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
     :ets.insert(checkpoint_table, checkpoints)
   end
 
-  defp restore_subscriptions_cache(origin, subscriptions_table) do
+  defp restore_subscriptions_cache(conn, subscriptions_table) do
     {:ok, _, rows} =
-      query(origin, "SELECT * FROM #{Extension.client_shape_subscriptions_table()}", [])
+      :epgsql.equery(conn, "SELECT * FROM #{Extension.client_shape_subscriptions_table()}", [])
 
     subscriptions =
       for {client_id, subscription_id, xmin, pos, shape_requests_bin} <- rows do
@@ -778,9 +777,9 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
     :ets.insert(subscriptions_table, subscriptions)
   end
 
-  defp restore_additional_data_cache(origin, additional_data_table) do
+  defp restore_additional_data_cache(conn, additional_data_table) do
     {:ok, _, rows} =
-      query(origin, "SELECT * FROM #{Extension.client_additional_data_table()}", [])
+      :epgsql.equery(conn, "SELECT * FROM #{Extension.client_additional_data_table()}", [])
 
     records =
       for {client_id, xmin, pos, subject, subscription_id, graph_diff, included_txns} <- rows do
@@ -791,9 +790,9 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
     :ets.insert(additional_data_table, records)
   end
 
-  defp restore_actions_cache(origin, actions_table) do
+  defp restore_actions_cache(conn, actions_table) do
     {:ok, _, rows} =
-      query(origin, "SELECT * FROM #{Extension.client_actions_table()}", [])
+      :epgsql.equery(conn, "SELECT * FROM #{Extension.client_actions_table()}", [])
 
     actions =
       for {client_id, txid, actions_bin} <- rows do
@@ -803,11 +802,24 @@ defmodule Electric.Satellite.ClientReconnectionInfo do
     :ets.insert(actions_table, actions)
   end
 
-  defp query(origin, query, params) when is_binary(query) and is_list(params) do
+  defp query(origin, query_str, params)
+       when is_binary(origin) and is_binary(query_str) and is_list(params) do
+    with_conn(origin, &:epgsql.equery(&1, query_str, params))
+  end
+
+  if Mix.env() == :test do
+    defp with_conn("test-origin", _fun) do
+      :ok
+    end
+  end
+
+  defp with_conn(origin, fun) when is_binary(origin) and is_function(fun, 1) do
     origin
     |> connector_config()
     |> Connectors.get_connection_opts()
-    |> Client.with_conn(fn conn -> :epgsql.equery(conn, query, params) end)
+    |> Client.with_conn(fun)
+
+    :ok
   end
 
   defp connector_config(origin) do
