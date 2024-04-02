@@ -9,7 +9,11 @@ defmodule Electric.Postgres.Extension.Migrations.Migration_20240401134100_Client
   @impl true
   def up(_schema) do
     additional_data_subject_enum = Extension.client_additional_data_subject_type()
-    txid_type = Extension.txid_type()
+
+    # NOTE: epgsql chokes on the xid8 type, resulting in problems with passing parameters to
+    # :epgsql.equery().
+    # txid_type = Extension.txid_type()
+    txid_type = "BIGINT"
 
     [
       """
