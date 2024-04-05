@@ -34,6 +34,11 @@
     [invoke connect_to_electric $electric $port $migrations $connectToElectric]
 [endmacro]
 
+[macro client_disconnect]
+    !await client.disconnect(db)
+    ??$node
+[endmacro]
+
 [macro setup_client satellite_number electric port]
     [invoke setup_client_with_migrations $satellite_number $electric $port "[]" "true"]
 [endmacro]
