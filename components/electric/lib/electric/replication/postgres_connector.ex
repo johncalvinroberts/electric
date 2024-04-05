@@ -151,6 +151,9 @@ defmodule Electric.Replication.PostgresConnector do
   end
 
   defp log_child_error(child_id, reason, _connector_config) do
+    IO.inspect(child_id)
+    IO.inspect(reason)
+
     Electric.Errors.failed_to_start_child_error(__MODULE__, child_id, reason)
     |> Electric.Errors.print_fatal_error()
   end

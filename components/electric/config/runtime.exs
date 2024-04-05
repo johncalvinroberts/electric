@@ -285,7 +285,11 @@ connector_config =
     ]
   end
 
-config :electric, Electric.Replication.Connectors, List.wrap(connector_config)
+if connector_config do
+  config :electric, Electric.Replication.Connectors, connector_config
+
+  config :electric, Electric.Postgres.Repo, pool_size: 10
+end
 
 enable_proxy_tracing? = env!("PROXY_TRACING_ENABLE", :boolean, default_proxy_tracing_enable)
 config :electric, Electric.Postgres.Proxy.Handler.Tracing, enable: enable_proxy_tracing?
