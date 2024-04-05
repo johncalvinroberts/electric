@@ -12,57 +12,71 @@
 
 [invoke setup_client 1 electric_1 5133]
 
+[shell pg_1]
+    !INSERT INTO public.items (id, content) VALUES \
+       ('00000000-0000-0000-0000-000000000001', 'not in shape'), \
+       ('00000000-0000-0000-0000-000000000002', 'shape-1'), \
+       ('00000000-0000-0000-0000-000000000003', 'shape-2');
+    ??INSERT 0 3
+
+    !INSERT INTO public.other_items VALUES \
+       ('1', 'first', '00000000-0000-0000-0000-000000000001'), \
+       ('2', 'second', '00000000-0000-0000-0000-000000000002'), \
+       ('3', 'third', NULL);
+    ??INSERT 0 3
+
 [shell satellite_1]
-    [invoke node_sync_items ""]
+    # [invoke node_sync_items "this.content like 'shape-%'"]
     [invoke node_sync_other_items ""]
 
-# [shell pg_1]
-#     !INSERT INTO public.blobs (id, blob) VALUES ('row1', '\x0001ff4a');
-#     ??INSERT 0 1
+    # Wait for the rows to arrive
+    [invoke node_await_get "not in shape"]
+    [invoke node_await_get "shape-1"]
 
-# [shell satellite_1]
-#     # Wait for the rows to arrive
-#     [invoke node_await_get_blob "row1"]
+# [shell electric_1]
+#     # stop the server to restart it later
+#     [invoke stop_electric 1]
 
-#     # read raw blob that is stored in the DB
-#     [invoke node_get_blob "row1" "Uint8Array(4) [ 0, 1, 255, 74 ]"]
+[shell pg_1]
+    !INSERT INTO public.items (id, content) VALUES \
+       ('00000000-0000-0000-0000-000000000004', '.'), \
+       ('00000000-0000-0000-0000-000000000005', 'shape-3'), \
+       ('00000000-0000-0000-0000-000000000006', '..');
+    ??INSERT 0 3
 
-#     # write and read null values
-#     [invoke node_write_blob "row2" "null"]
-#     [invoke node_get_blob "row2" "null"]
-
-#     # write and read empty byte arrays
-#     [invoke node_write_blob "row3" "new Uint8Array([])"]
-#     [invoke node_get_blob "row3" "Uint8Array(0) []"]
-
-#     # write regular bytestring values
-#     [invoke node_write_blob "row4" "new Uint8Array([0, 1, 255, 182])"]
-#     [invoke node_get_blob "row4" "Uint8Array(4) [ 0, 1, 255, 182 ]"]
-
-
-# [shell pg_1]
-#     [invoke wait-for "SELECT * FROM public.blobs;" "row4" 10 $psql]
-
-#     !SELECT * FROM public.blobs;
-#     ??row1 | \x0001ff4a
-#     ??row2 | <NULL>
-#     ??row3 | \x
-#     ??row4 | \x0001ffb6
+    !INSERT INTO public.other_items VALUES \
+       ('4', '.', '00000000-0000-0000-0000-000000000004'), \
+       ('5', '..', '00000000-0000-0000-0000-000000000005'), \
+       ('6', '...', NULL);
+    ??INSERT 0 3
 
 # Start a new Satellite client that has a different set of subscriptions
 [invoke setup_client 2 electric_1 5133]
 
 [shell satellite_2]
-    [invoke node_sync_items ""]
+    # [invoke node_sync_items "this.content = '*'"]
+    # [invoke node_sync_other_items "this.id like 'two-%'"]
+    # !const { synced } = await db.db.items.sync({ where: "this.content like 'shape-%'" })
+    !const { synced } = await db.db.items.sync({ \
+       where: "this.content like 'shape-%'", \
+       include: { other_items: true } \
+     }); await synced
 
-    # Disconnect the client so that it does not see the next batch of updates
-    [invoke client_disconnect]
+    # # Disconnect the client so that it does not see the next batch of updates
+    # [invoke client_disconnect]
+
+    # Wait for the rows to arrive
+    [invoke node_await_get "shape-1"]
+    [invoke node_await_get "shape-2"]
+    [invoke node_await_get "shape-3"]
+    [invoke node_await_get_from_table "other_items" "second"]
+    [invoke node_await_get_from_table "other_items" ".."]
 
 [shell pg_1]
     !INSERT INTO public.items (id, content) VALUES (gen_random_uuid(), '...');
     ??INSERT 0 1
 
-[shell satellite_1]
+# [shell satellite_1]
     #!clienet.add_item(...)
 
 

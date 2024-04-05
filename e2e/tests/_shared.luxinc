@@ -41,6 +41,11 @@
     [invoke ok]
 [endmacro]
 
+[macro stop_electric n]
+    !make stop_electric_${n}
+    [invoke ok]
+[endmacro]
+
 [macro client_session user_id session_id]
     [invoke log "user ${user_id}: session ${session_id}: start"]
     [local client_id=client_${user_id}_${session_id}]
