@@ -1,5 +1,16 @@
 # electric-sql
 
+## 0.9.7
+
+### Patch Changes
+
+- da1b6f6d: Fixed incorrect field transformation for queries with included relations
+- 179e9945: Fix `op-sqlite` driver integration using HostObjects and failing to return results
+- b7e99c88: Added support for BYTEA/BLOB column type across the sync service, TS client, and client generator
+- Updated dependencies [d8ee5f0e]
+- Updated dependencies [b7e99c88]
+  - @electric-sql/prisma-generator@1.1.4
+
 ## 0.9.6
 
 ### Patch Changes

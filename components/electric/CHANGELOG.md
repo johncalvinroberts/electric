@@ -1,5 +1,12 @@
 # @core/electric
 
+## 0.9.5
+
+### Patch Changes
+
+- 419e7b28: Fix unbounded disk usage growth caused by the WAL records retained by Electric's replication slot.
+- b7e99c88: Added support for BYTEA/BLOB column type across the sync service, TS client, and client generator
+
 ## 0.9.4
 
 ### Patch Changes

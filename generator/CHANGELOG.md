@@ -1,5 +1,12 @@
 # @electric-sql/prisma-generator
 
+## 1.1.4
+
+### Patch Changes
+
+- d8ee5f0e: Do not import `Relation` class if data model does not have any relations - fixes `unused import` TS errors.
+- b7e99c88: Added support for BYTEA/BLOB column type across the sync service, TS client, and client generator
+
 ## 1.1.3
 
 ### Patch Changes
