@@ -64,7 +64,7 @@ defmodule Electric.Postgres.SQLGenerator.Index do
           stmt([
             "ALTER INDEX",
             optional("IF EXISTS"),
-            Schema.name(index),
+            quote_ident(index),
             stmt(["RENAME TO", name()])
           ])
         else
@@ -132,7 +132,7 @@ defmodule Electric.Postgres.SQLGenerator.Index do
           # "drop index concurrently does not support cascade"
           if(opts[:cascade], do: nil, else: optional("CONCURRENTLY")),
           optional("IF EXISTS"),
-          Schema.name(index),
+          quote_ident(index),
           if(opts[:cascade], do: "CASCADE", else: optional(["CASCADE", "RESTRICT"]))
         ])
     end)
