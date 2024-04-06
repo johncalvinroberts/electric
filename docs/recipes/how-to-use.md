@@ -28,4 +28,4 @@ The data access and interaction component will assume that it is being used with
 
 To avoid tying these recipes to any particular UI paradigm, the examples will use generic view components to illustrate how to expose the relevant data and interact with it, and will not assume any particular UI library.
 
-Feel free to replace those with your custom UI implementation or any library of your choosing (e.g. [shad/cn](https://ui.shadcn.com/), [MaterialUI](https://mui.com/material-ui/)).
+Feel free to replace those with your custom UI implementation or any library of your choosing (e.g. [shadcn/ui](https://ui.shadcn.com/), [MaterialUI](https://mui.com/material-ui/)).
